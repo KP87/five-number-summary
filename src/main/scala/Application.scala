@@ -39,6 +39,10 @@ object Application extends App {
   runWithTimeOfExecution(quartileByRddFilter("lng"))
   runWithTimeOfExecution(quartileByRddFilterInLoop("lng"))
 
+  //  Comparison of few methods to calculate 'five summary values' values
+  runWithTimeOfExecution(fiveNumberSummaryBySQL(allDataDF,"lng", "lat"))
+  runWithTimeOfExecution(fiveNumberSummary(allDataDF,"lng", "lat"))
+
   def runWithTimeOfExecution[A](anyFunction: => A): Unit = {
     val startTime = System.nanoTime().toDouble
     val output = anyFunction
@@ -233,5 +237,51 @@ object Application extends App {
       .head()
       .getSeq[Double](0)
       .toArray
+  }
+
+  // Methods to calculate 'five summary values' values
+  def fiveNumberSummary(dataFrame: DataFrame, columns:String*): DataFrame = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    dataFrame.select(columns.head, columns.tail: _*).summary("min", "25%", "50%", "75%", "max")
+  }
+
+  def fiveNumberSummaryBySQL(dataFrame: DataFrame, columns:String*): DataFrame = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    val viewName = tableName + "_tmp"
+    allDataDF.createOrReplaceTempView(viewName)
+
+    val input: Seq[(Int, Seq[String])] = List(
+      (0, "min" :: Nil),
+      (1, "first quartile" :: Nil),
+      (2, "median" :: Nil),
+      (3, "third quartile" :: Nil),
+      (4, "max" :: Nil))
+
+    def query(input: Seq[(Int, Seq[String])], columns:List[String]):Seq[(Int, Seq[String])] = columns match {
+      case Nil => input
+      case head :: tail => {
+        val agg = spark
+          .sql(s"SELECT MIN($head) as min, percentile_approx($head, array(0.25,0.5,0.75), 100) as quartile, MAX($head) as max FROM $viewName")
+          .head()
+
+        val queryOutput: Seq[Double] = agg.getDouble(0) +: agg.getSeq[Double](1) :+ agg.getDouble(2)
+
+        val output = input.map(item => (item._1, item._2 :+ queryOutput(item._1).toString))
+
+        query(output, tail)
+      }
+    }
+
+    val summaryRDD: RDD[Row] = spark.sparkContext.parallelize(query(input, columns.toList).map(item =>  Row.fromSeq(item._2)))
+
+    val fields: Array[StructField] =
+      StructField("summary", StringType, true) +:
+        columns.map(columnName => StructField(columnName, StringType, true)).toArray
+
+    val schema: StructType = new StructType(fields)
+
+    spark.createDataFrame(summaryRDD, schema)
   }
 }
