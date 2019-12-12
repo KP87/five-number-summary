@@ -29,6 +29,16 @@ object Application extends App {
   runWithTimeOfExecution(minMaxByRdd("lng"))
   runWithTimeOfExecution(minMaxBySummary("lng"))
 
+  //  Comparison of few methods to calculate quartiles values
+  runWithTimeOfExecution(quartileBySQL("lng"))
+  runWithTimeOfExecution(approxQuartile("lng"))
+  runWithTimeOfExecution(quartileBySQLApprox("lng"))
+  runWithTimeOfExecution(quartileByWindow("lng"))
+  runWithTimeOfExecution(quartileByDataFrame("lng"))
+  runWithTimeOfExecution(quartileByRdd("lng"))
+  runWithTimeOfExecution(quartileByRddFilter("lng"))
+  runWithTimeOfExecution(quartileByRddFilterInLoop("lng"))
+
   def runWithTimeOfExecution[A](anyFunction: => A): Unit = {
     val startTime = System.nanoTime().toDouble
     val output = anyFunction
@@ -86,5 +96,142 @@ object Application extends App {
     val min = agg.reduce((a, b) => if(a.getDouble(0) < b.getDouble(0)) a else b).getDouble(0)
     val max = agg.reduce((a, b) => if(a.getDouble(0) > b.getDouble(0)) a else b).getDouble(0)
     Array(min, max)
+  }
+
+  // Methods to calculate quartiles values
+  def quartileByDataFrame(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    val count = allDataDF.count.toInt
+    val firstQuartileIndex = Math.round(0.25 * count.toDouble).toInt
+    val secondQuartileIndex = Math.round(0.5 * count.toDouble).toInt
+    val thirdQuartileIndex = Math.round(0.75 * count.toDouble).toInt
+
+    val lngDF: Dataset[Row] = allDataDF.select(columnName).sort(columnName)
+
+    val thirdQuartileArray: Array[Row] = lngDF.take(thirdQuartileIndex)
+    val thirdQuartileValue: Double = thirdQuartileArray.last.getDouble(0)
+
+    val secondQuartileArray: Array[Row] = thirdQuartileArray.take(secondQuartileIndex)
+    val secondQuartileValue: Double = secondQuartileArray.last.getDouble(0)
+
+    val firstQuartileArray: Array[Row] = secondQuartileArray.take(firstQuartileIndex)
+    val firstQuartileValue: Double = firstQuartileArray.last.getDouble(0)
+
+    Array(firstQuartileValue, secondQuartileValue, thirdQuartileValue)
+  }
+
+  def quartileByRdd(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    val lngDF: RDD[(Long, Double)] = allDataDF
+      .select(columnName)
+      .rdd
+      .map(x => x.getDouble(0))
+      .sortBy(x => x)
+      .zipWithIndex()
+      .map(_.swap)
+
+    val count = lngDF.count
+
+    val firstQuartileIndex = Math.round(0.25 * count.toDouble)
+    val secondQuartileIndex = Math.round(0.5 * count.toDouble)
+    val thirdQuartileIndex = Math.round(0.75 * count.toDouble)
+
+    val firstQuartileValue: Double = lngDF.lookup(firstQuartileIndex).head
+    val secondQuartileValue: Double = lngDF.lookup(secondQuartileIndex).head
+    val thirdQuartileValue: Double = lngDF.lookup(thirdQuartileIndex).head
+
+    Array(firstQuartileValue, secondQuartileValue, thirdQuartileValue)
+  }
+
+  def quartileByRddFilter(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    val lngDF: RDD[(Double, Long)] = allDataDF
+      .select(columnName)
+      .rdd
+      .map(x => x.getDouble(0))
+      .sortBy(x => x)
+      .zipWithIndex()
+
+    val count = lngDF.count
+
+    val firstQuartileIndex = Math.round(0.25 * count.toDouble)
+    val secondQuartileIndex = Math.round(0.5 * count.toDouble)
+    val thirdQuartileIndex = Math.round(0.75 * count.toDouble)
+
+    val firstQuartileValue = lngDF.filter(_._2 == firstQuartileIndex).first()._1
+    val secondQuartileValue: Double = lngDF.filter(_._2 == secondQuartileIndex).first()._1
+    val thirdQuartileValue: Double = lngDF.filter(_._2 == thirdQuartileIndex).first()._1
+
+    Array(firstQuartileValue, secondQuartileValue, thirdQuartileValue)
+  }
+
+  def quartileByRddFilterInLoop(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    import spark.implicits._
+    val lngDF: RDD[(Double, Long)] = allDataDF
+      .map(x => x.getDouble(2))
+      .rdd
+      .sortBy(x => x)
+      .zipWithIndex()
+
+    val count: Long = lngDF.count
+
+    val output: Seq[Double] = for(percentile <- 25 to 75 by 25) yield {
+      lngDF.filter(_._2 == Math.round(percentile/100.0 * count.toDouble).toInt).first()._1
+    }
+    output.toArray
+  }
+
+  def quartileByWindow(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    import org.apache.spark.sql.expressions.Window
+    import org.apache.spark.sql.functions._
+
+    val lngDF: DataFrame = allDataDF
+      .select("lng")
+      .withColumn("percentile", percent_rank() over Window.orderBy(columnName))
+
+    val firstQuartileValue: Double = lngDF.filter("percentile >= 0.25").head().getDouble(0)
+    val secondQuartileValue: Double = lngDF.filter("percentile >= 0.5").head().getDouble(0)
+    val thirdQuartileValue: Double = lngDF.filter("percentile >= 0.75").head().getDouble(0)
+
+    Array(firstQuartileValue, secondQuartileValue, thirdQuartileValue)
+  }
+
+  def approxQuartile(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    allDataDF.stat.approxQuantile(columnName, Array(0.25,0.5,0.75),0.0001)
+  }
+
+  def quartileBySQL(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    val viewName = tableName + "_tmp"
+    allDataDF.createOrReplaceTempView(viewName)
+
+    spark
+      .sql(s"SELECT percentile($columnName, array(0.25,0.5,0.75)) as quartile FROM $viewName")
+      .head()
+      .getSeq[Double](0)
+      .toArray
+  }
+
+  def quartileBySQLApprox(columnName:String): Array[Double] = {
+    println(s"Function name:\t${Thread.currentThread.getStackTrace()(1).getMethodName}")
+
+    val viewName = tableName + "_tmp"
+    allDataDF.createOrReplaceTempView(viewName)
+
+    spark
+      .sql(s"SELECT percentile_approx($columnName, array(0.25,0.5,0.75), 100) as quartile FROM $viewName")
+      .head()
+      .getSeq[Double](0)
+      .toArray
   }
 }
